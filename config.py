@@ -1,8 +1,5 @@
 """Configuration constants for hermes-mcp-server."""
 
-import os
-from pathlib import Path
-
 DASHBOARD_WS_URL = "ws://localhost:9119/api/ws"
 DASHBOARD_HTTP_URL = "http://localhost:9119"
 
@@ -27,4 +24,6 @@ DEFAULT_MSG_LIMIT = 50
 MAX_MSG_LIMIT = 200
 
 # Session file
+import os
+from pathlib import Path
 STATE_FILE = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "tmp" / ".hermes-mcp-session"

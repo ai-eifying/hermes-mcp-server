@@ -6,7 +6,6 @@ from .approval import register_approval_tools
 from .cli import register_cli_tools
 from .config_tools import register_config_tools
 from .model import register_model_tools
-from .skills import register_skill_tools
 
 __all__ = [
     "register_session_tools",
@@ -16,5 +15,4 @@ __all__ = [
     "register_cli_tools",
     "register_config_tools",
     "register_model_tools",
-    "register_skill_tools",
 ]

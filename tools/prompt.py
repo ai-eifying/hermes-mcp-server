@@ -30,7 +30,7 @@ def register_prompt_tools(mcp, bridge):
             else:
                 return json.dumps({"error": "Failed to auto-create session"}, indent=2)
 
-        await bridge.clear_events()
+        bridge.clear_events()
 
         # Submit prompt (returns immediately with streaming status)
         try:
@@ -108,7 +108,7 @@ def register_prompt_tools(mcp, bridge):
                 bridge.session_id = r["result"].get("session_id", "")
                 bridge._save_session_id(r["result"].get("stored_session_id", bridge.session_id))
 
-        await bridge.clear_events()
+        bridge.clear_events()
 
         try:
             r = await bridge.call("prompt.background", {
@@ -131,6 +131,52 @@ def register_prompt_tools(mcp, bridge):
             "ok": True,
             "session_id": bridge.session_id,
             "hint": "Use hermes_messages_stream to poll for results.",
+        }, indent=2)
+
+    @mcp.tool()
+    async def hermes_prompt_stream(prompt: str) -> str:
+        """Submit a prompt and enable event streaming (non-blocking).
+
+        Unlike hermes_prompt_background (fire-and-forget), this keeps the
+        event buffer intact so hermes_messages_stream can read tool calls,
+        message chunks, and completion events in real-time.
+
+        Workflow:
+            1. hermes_prompt_stream("do something")  → returns immediately
+            2. loop: hermes_messages_stream(timeout=5) → returns one event per call
+            3. break when event == "completed" or "error"
+
+        Args:
+            prompt: The prompt text to send
+        """
+        if not bridge.session_id:
+            r = await bridge.call("session.create", {"title": "mcp-stream"}, timeout=15)
+            if "result" in r:
+                bridge.session_id = r["result"].get("session_id", "")
+                bridge._save_session_id(r["result"].get("stored_session_id", bridge.session_id))
+
+        # Do NOT clear events — let them accumulate for streaming
+        try:
+            r = await bridge.call("prompt.submit", {
+                "session_id": bridge.session_id,
+                "text": prompt,
+            }, timeout=30)
+        except TimeoutError:
+            return json.dumps({
+                "ok": True,
+                "session_id": bridge.session_id,
+                "hint": "Submit timed out but task may have started. Use hermes_messages_stream.",
+            }, indent=2)
+        except Exception as e:
+            return json.dumps({"error": str(e)}, indent=2)
+
+        if "error" in r:
+            return json.dumps({"error": r["error"]}, indent=2)
+
+        return json.dumps({
+            "ok": True,
+            "session_id": bridge.session_id,
+            "hint": "Use hermes_messages_stream to read events one by one.",
         }, indent=2)
 
     @mcp.tool()

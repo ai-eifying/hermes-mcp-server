@@ -24,8 +24,6 @@ def register_model_tools(mcp, bridge):
         """Disconnect the current model (allows switching)."""
         try:
             r = await bridge.call("model.disconnect", {}, timeout=SHORT_RPC_TIMEOUT)
-            if "error" in r:
-                return json.dumps({"error": r["error"]}, indent=2)
             return json.dumps({"ok": True}, indent=2)
         except Exception as e:
             return json.dumps({"error": str(e)}, indent=2)

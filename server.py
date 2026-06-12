@@ -40,7 +40,7 @@ except ImportError:
     sys.exit("Error: 'websockets' package required. Install: pip install websockets")
 
 from ws_bridge import WSBridge, ReadCursor
-from db_reader import DBReader
+# No local DB — all data access via WS RPC
 from tools import (
     register_session_tools,
     register_prompt_tools,
@@ -49,7 +49,6 @@ from tools import (
     register_cli_tools,
     register_config_tools,
     register_model_tools,
-    register_skill_tools,
 )
 
 
@@ -68,22 +67,19 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, auto_approve: bool 
     )
 
     bridge = WSBridge(auto_approve=auto_approve)
-    db = DBReader()
     cursor = ReadCursor()
 
     # Register all tool groups
     register_session_tools(mcp, bridge)
     register_prompt_tools(mcp, bridge)
-    register_messaging_tools(mcp, bridge, db, cursor)
+    register_messaging_tools(mcp, bridge, cursor)
     register_approval_tools(mcp, bridge)
     register_cli_tools(mcp, bridge)
     register_config_tools(mcp, bridge)
     register_model_tools(mcp, bridge)
-    register_skill_tools(mcp, db)
 
     # Store refs for lifecycle management
     mcp._bridge = bridge
-    mcp._db = db
     mcp._cursor = cursor
 
     return mcp

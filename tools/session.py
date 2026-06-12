@@ -92,12 +92,7 @@ def register_session_tools(mcp, bridge):
         Args:
             session_id: The session to delete
         """
-        try:
-            r = await bridge.call("session.delete", {"session_id": session_id}, timeout=SHORT_RPC_TIMEOUT)
-        except Exception as e:
-            return json.dumps({"error": str(e)}, indent=2)
-        if "error" in r:
-            return json.dumps({"error": r["error"]}, indent=2)
+        r = await bridge.call("session.delete", {"session_id": session_id}, timeout=SHORT_RPC_TIMEOUT)
         if bridge.session_id == session_id:
             bridge.session_id = ""
         return json.dumps({"ok": True, "deleted": session_id}, indent=2)

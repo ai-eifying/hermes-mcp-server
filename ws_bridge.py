@@ -48,7 +48,6 @@ class WSBridge:
         self.auto_approve = auto_approve
         self._pending: dict[str, asyncio.Future] = {}
         self._events: list[dict] = []
-        self._events_lock = asyncio.Lock()
         self._events_cv: Optional[asyncio.Condition] = None
         self._req_counter = 0
         self._lock = asyncio.Lock()
@@ -188,7 +187,7 @@ class WSBridge:
             if params:
                 msg["params"] = params
 
-            fut = asyncio.get_running_loop().create_future()
+            fut = asyncio.get_event_loop().create_future()
             self._pending[req_id] = fut
             try:
                 await self.ws.send(json.dumps(msg))
@@ -236,21 +235,20 @@ class WSBridge:
                 "session_id": params.get("session_id", ""),
                 "data": params.get("payload", {}),
             }
-            asyncio.create_task(self._append_event(event))
+            self._events.append(event)
+            if event["event"] == "approval.request" and self.auto_approve:
+                asyncio.create_task(self._auto_approve(event))
+            if self._events_cv:
+                asyncio.create_task(self._notify_events())
             return
 
         # Legacy event format (direct event field)
         if "event" in data:
-            asyncio.create_task(self._append_event(data))
-
-    async def _append_event(self, event: dict):
-        """Append event to buffer with lock protection."""
-        async with self._events_lock:
-            self._events.append(event)
-        if event.get("event") == "approval.request" and self.auto_approve:
-            asyncio.create_task(self._auto_approve(event))
-        if self._events_cv:
-            asyncio.create_task(self._notify_events())
+            self._events.append(data)
+            if data["event"] == "approval.request" and self.auto_approve:
+                asyncio.create_task(self._auto_approve(data))
+            if self._events_cv:
+                asyncio.create_task(self._notify_events())
 
     async def _notify_events(self):
         async with self._events_cv:
@@ -270,16 +268,32 @@ class WSBridge:
             except Exception as e:
                 logger.warning("Auto-approve failed: %s", e)
 
+    # ── Session RPC shortcuts ──
+
+    async def session_history(self, session_id: str) -> dict:
+        """Get full conversation history via WS RPC."""
+        return await self.call("session.history", {"session_id": session_id})
+
+    async def session_list(self, limit: int = 50) -> dict:
+        """List all sessions via WS RPC."""
+        return await self.call("session.list", {"limit": limit})
+
+    async def session_status(self, session_id: str) -> dict:
+        """Get session status via WS RPC."""
+        return await self.call("session.status", {"session_id": session_id})
+
+    async def session_most_recent(self) -> dict:
+        """Get the most recent session via WS RPC."""
+        return await self.call("session.most_recent")
+
     # ── Events ──
 
-    async def clear_events(self):
-        async with self._events_lock:
-            self._events.clear()
+    def clear_events(self):
+        self._events.clear()
 
-    async def collect_events(self) -> list[dict]:
-        async with self._events_lock:
-            evs = self._events.copy()
-            self._events.clear()
+    def collect_events(self) -> list[dict]:
+        evs = self._events.copy()
+        self._events.clear()
         return evs
 
     async def wait_for_event(self, timeout_ms: int = 30000) -> Optional[dict]:
@@ -288,9 +302,8 @@ class WSBridge:
         start = time.time()
 
         while time.time() - start < timeout_s:
-            async with self._events_lock:
-                if self._events:
-                    return self._events.pop(0)
+            if self._events:
+                return self._events.pop(0)
             if self._events_cv:
                 remaining = timeout_s - (time.time() - start)
                 try:
@@ -308,28 +321,44 @@ class WSBridge:
 
 
 class ReadCursor:
-    """Per-session read position tracking for unread message support."""
+    """Per-session read position tracking for unread message support.
+
+    Uses message list length as cursor when messages lack 'id' fields.
+    """
 
     def __init__(self):
-        self._cursors: dict[str, int] = {}  # session_id -> last_read_message_id
+        self._cursors: dict[str, int] = {}  # session_id -> last_read_count
 
     def get_cursor(self, session_id: str) -> int:
         return self._cursors.get(session_id, 0)
 
-    def set_cursor(self, session_id: str, msg_id: int):
-        self._cursors[session_id] = msg_id
+    def set_cursor(self, session_id: str, value: int):
+        self._cursors[session_id] = value
 
     def advance(self, session_id: str, messages: list[dict]):
-        """Advance cursor to the latest message ID."""
+        """Advance cursor to the latest message position."""
         if messages:
-            max_id = max(m.get("id", 0) for m in messages)
-            if max_id > self.get_cursor(session_id):
-                self.set_cursor(session_id, max_id)
+            # Try message 'id' field first, fall back to list length
+            ids = [m.get("id") for m in messages if m.get("id") is not None]
+            if ids:
+                max_id = max(ids)
+                if max_id > self.get_cursor(session_id):
+                    self.set_cursor(session_id, max_id)
+            else:
+                # Messages lack 'id' — use list length as cursor
+                self.set_cursor(session_id, len(messages))
 
     def filter_unread(self, session_id: str, messages: list[dict]) -> list[dict]:
         """Return only messages after the cursor."""
+        if not messages:
+            return []
         cursor = self.get_cursor(session_id)
-        return [m for m in messages if m.get("id", 0) > cursor]
+        # Try message 'id' field first, fall back to list index
+        ids = [m.get("id") for m in messages if m.get("id") is not None]
+        if ids:
+            return [m for m in messages if m.get("id", 0) > cursor]
+        # Messages lack 'id' — treat cursor as count of already-read messages
+        return messages[cursor:]
 
     def read_all(self, session_id: str, messages: list[dict], limit: int = 50) -> dict:
         """Return all messages, don't update cursor."""
@@ -344,7 +373,7 @@ class ReadCursor:
         """Return unread messages, advance cursor."""
         unread = self.filter_unread(session_id, messages)
         if unread:
-            self.advance(session_id, unread)
+            self.advance(session_id, messages)
             return {
                 "status": "messages",
                 "count": len(unread),

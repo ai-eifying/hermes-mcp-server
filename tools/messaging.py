@@ -1,4 +1,4 @@
-"""Messaging + Streaming MCP tools — conversations, messages read/unread/stream, send."""
+"""Messaging + Streaming MCP tools — messages read/unread/stream via WS RPC only."""
 
 from __future__ import annotations
 
@@ -7,88 +7,57 @@ import time
 from config import SHORT_RPC_TIMEOUT, DEFAULT_MSG_LIMIT, STREAM_DEFAULT_TIMEOUT, STREAM_MAX_TIMEOUT, STREAM_POLL_INTERVAL
 
 
-def register_messaging_tools(mcp, bridge, db, cursor):
-    """Register 8 messaging tools with read-cursor support."""
+def register_messaging_tools(mcp, bridge, cursor):
+    """Register 7 messaging tools — all via WS RPC (no local DB)."""
 
-    # ── Conversations ──
-
-    @mcp.tool()
-    def hermes_conversations_list(platform: str = "", limit: int = DEFAULT_MSG_LIMIT) -> str:
-        """List active messaging conversations across connected platforms.
-
-        Args:
-            platform: Filter by platform (telegram, discord, slack, etc.)
-            limit: Max conversations (default 50)
-        """
-        entries = db.get_sessions_index()
-        conversations = []
-
-        for key, entry in entries.items():
-            origin = entry.get("origin", {})
-            p = entry.get("platform") or origin.get("platform", "")
-            if platform and p.lower() != platform.lower():
-                continue
-
-            display_name = entry.get("display_name", "")
-            chat_name = origin.get("chat_name", "")
-            conversations.append({
-                "session_key": key,
-                "session_id": entry.get("session_id", ""),
-                "platform": p,
-                "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
-                "display_name": display_name,
-                "chat_name": chat_name,
-                "user_name": origin.get("user_name", ""),
-                "updated_at": entry.get("updated_at", ""),
-            })
-
-        conversations.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
-        return json.dumps({
-            "count": min(len(conversations), limit),
-            "conversations": conversations[:limit],
-        }, indent=2, ensure_ascii=False)
+    # ── Messages History ──
 
     @mcp.tool()
-    def hermes_conversation_get(session_key: str) -> str:
-        """Get detailed info about one conversation by its session key.
+    async def hermes_messages_history(
+        session_id: str = "",
+        limit: int = DEFAULT_MSG_LIMIT,
+    ) -> str:
+        """Get full conversation history of a session via WS RPC.
 
         Args:
-            session_key: The session key from hermes_conversations_list
-        """
-        entry = db.get_session_entry(session_key)
-        if not entry:
-            return json.dumps({"error": f"Conversation not found: {session_key}"})
+            session_id: Target session ID (empty = current session)
+            limit: Max messages to return (default 50)
 
-        origin = entry.get("origin", {})
-        return json.dumps({
-            "session_key": session_key,
-            "session_id": entry.get("session_id", ""),
-            "platform": entry.get("platform") or origin.get("platform", ""),
-            "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
-            "display_name": entry.get("display_name", ""),
-            "user_name": origin.get("user_name", ""),
-            "chat_name": origin.get("chat_name", ""),
-            "chat_id": origin.get("chat_id", ""),
-            "thread_id": origin.get("thread_id"),
-            "updated_at": entry.get("updated_at", ""),
-            "created_at": entry.get("created_at", ""),
-            "input_tokens": entry.get("input_tokens", 0),
-            "output_tokens": entry.get("output_tokens", 0),
-            "total_tokens": entry.get("total_tokens", 0),
-        }, indent=2)
+        Returns JSON with messages from the Hermes session.
+        """
+        sid = session_id or bridge.session_id
+        if not sid:
+            return json.dumps({"error": "No session. Use hermes_session_create first."})
+
+        try:
+            r = await bridge.session_history(sid)
+            if "error" in r:
+                return json.dumps({"error": r["error"]["message"]})
+
+            messages = r.get("result", {}).get("messages", [])
+            count = r.get("result", {}).get("count", 0)
+
+            return json.dumps({
+                "status": "ok",
+                "count": min(count, limit),
+                "session_id": sid,
+                "messages": messages[-limit:],
+            }, indent=2, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
 
     # ── Messages Read ──
 
     @mcp.tool()
-    def hermes_messages_read(
-        session_key: str = "",
+    async def hermes_messages_read(
+        session_id: str = "",
         mode: str = "all",
         limit: int = DEFAULT_MSG_LIMIT,
     ) -> str:
         """Read messages from a conversation with read-cursor tracking.
 
         Args:
-            session_key: Target session key (empty = use current session_id)
+            session_id: Target session ID (empty = current session)
             mode: "all" = all messages (no cursor update),
                   "unread" = only new messages since last read (updates cursor)
             limit: Max messages for "all" mode (default 50)
@@ -96,209 +65,183 @@ def register_messaging_tools(mcp, bridge, db, cursor):
         Returns JSON with:
             status: "ok" | "no_unread"
             count: number of messages
-            messages: [{id, role, content, timestamp}, ...]
+            messages: [{role, text, ...}, ...]
         """
-        sid = session_key or bridge.session_id
+        sid = session_id or bridge.session_id
         if not sid:
             return json.dumps({"error": "No session. Use hermes_session_create first."})
 
-        # Get messages — by key or by id
-        if session_key:
-            messages = db.get_messages_by_key(session_key, limit=500)
-        else:
-            # Try as session_id directly
-            messages = db.get_messages(sid, limit=500)
+        try:
+            r = await bridge.session_history(sid)
+            if "error" in r:
+                return json.dumps({"error": r["error"]["message"]})
 
-        if mode == "unread":
-            result = cursor.read_unread(sid, messages)
-        else:
-            result = cursor.read_all(sid, messages, limit=limit)
+            messages = r.get("result", {}).get("messages", [])
 
-        return json.dumps(result, indent=2, ensure_ascii=False)
+            if mode == "unread":
+                result = cursor.read_unread(sid, messages)
+            else:
+                result = cursor.read_all(sid, messages, limit=limit)
 
-    # ── Messages Stream ──
+            return json.dumps(result, indent=2, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    # ── Messages Stream (event-driven, batched) ──
 
     @mcp.tool()
     async def hermes_messages_stream(
-        session_key: str = "",
+        session_id: str = "",
         timeout: int = STREAM_DEFAULT_TIMEOUT,
     ) -> str:
-        """Wait for new messages using long-poll streaming.
+        """Wait for events using long-poll streaming. Returns ALL unread events.
 
-        Blocks until new messages arrive or the task completes. Use after
-        hermes_prompt_background to stream results as they come in.
+        Each call drains the event buffer, then waits for more events until
+        timeout. Consecutive events of the same type (e.g. reasoning.delta)
+        are merged into one. Returns immediately if events are buffered.
 
         Args:
-            session_key: Target session (empty = current)
+            session_id: Target session (empty = current)
             timeout: Max seconds to wait (default 60, max 300)
 
         Returns JSON with:
-            status: "messages" — new messages arrived
-                    "completed" — task finished, no unread messages
-                    "running" — task still running, no new messages yet (call again)
-                    "timeout" — timed out waiting
-            messages: [...] (when status=messages or completed)
+            status: "events" | "timeout"
+            events: [...] — list of merged events
+            Each event has: event, name, text, input, output, usage, etc.
         """
         timeout = max(1, min(timeout, STREAM_MAX_TIMEOUT))
-        sid = session_key or bridge.session_id
-        if not sid:
-            return json.dumps({"error": "No session."})
 
-        # 1. Check for unread immediately
-        if session_key:
-            messages = db.get_messages_by_key(session_key, limit=500)
-        else:
-            messages = db.get_messages(sid, limit=500)
+        # Collect all events: drain buffer + wait for more
+        raw_events = []
 
-        unread = cursor.filter_unread(sid, messages)
-        if unread:
-            cursor.advance(sid, unread)
-            return json.dumps({
-                "status": "messages",
-                "count": len(unread),
-                "cursor": cursor.get_cursor(sid),
-                "messages": unread,
-            }, indent=2, ensure_ascii=False)
+        # 1. Drain ALL buffered events
+        while bridge._events:
+            raw_events.append(bridge._events.pop(0))
 
-        # 2. No unread messages — wait for WS events (including background tasks)
-        # Don't check session.status here because background tasks run independently
-        start = time.time()
-        while time.time() - start < timeout:
-            remaining_ms = int((timeout - (time.time() - start)) * 1000)
-            ev = await bridge.wait_for_event(timeout_ms=min(5000, max(200, remaining_ms)))
+        # 2. If nothing buffered, wait for at least one event
+        if not raw_events:
+            start = time.time()
+            while time.time() - start < timeout:
+                remaining_ms = int((timeout - (time.time() - start)) * 1000)
+                ev = await bridge.wait_for_event(timeout_ms=min(3000, max(200, remaining_ms)))
+                if ev:
+                    raw_events.append(ev)
+                    break
+            if not raw_events:
+                # Still nothing — check if running
+                sid = session_id or bridge.session_id
+                still_running = False
+                if sid:
+                    try:
+                        status_r = await bridge.session_status(sid)
+                        output = status_r.get("result", {}).get("output", "")
+                        still_running = "Agent Running: Yes" in output
+                    except Exception:
+                        pass
+                return json.dumps({
+                    "status": "timeout",
+                    "events": [],
+                    "running": still_running,
+                }, indent=2)
 
-            if ev:
-                ev_name = ev.get("event", "")
-                # Check for message-related events
-                if ev_name in ("message", "response.chunk", "response.completed",
-                              "response.error", "background.complete", "background.error"):
-                    # Re-read messages
-                    if session_key:
-                        messages = db.get_messages_by_key(session_key, limit=500)
-                    else:
-                        messages = db.get_messages(sid, limit=500)
+        # 3. Drain any remaining buffered events (non-blocking)
+        while bridge._events:
+            raw_events.append(bridge._events.pop(0))
 
-                    unread = cursor.filter_unread(sid, messages)
-                    if unread:
-                        cursor.advance(sid, unread)
-                        return json.dumps({
-                            "status": "messages",
-                            "count": len(unread),
-                            "cursor": cursor.get_cursor(sid),
-                            "messages": unread,
-                        }, indent=2, ensure_ascii=False)
-
-                    # Completion event with no new text messages
-                    if ev_name in ("response.completed", "response.error",
-                                   "background.complete", "background.error"):
-                        # Include the event data for background tasks
-                        result = {
-                            "status": "completed",
-                            "count": 0,
-                            "messages": [],
-                        }
-                        # Attach background result if available
-                        bg_data = ev.get("data", {})
-                        if bg_data.get("text"):
-                            result["background_result"] = bg_data["text"]
-                        return json.dumps(result, indent=2, ensure_ascii=False)
-
-        # 4. Timeout — check if still running
-        try:
-            status_r = await bridge.call("session.status", {"session_id": sid}, timeout=SHORT_RPC_TIMEOUT)
-            still_running = status_r.get("result", {}).get("running", False)
-        except Exception:
-            still_running = False
+        # 4. Format and merge consecutive identical event types
+        events = _format_and_merge(raw_events)
 
         return json.dumps({
-            "status": "running" if still_running else "timeout",
-            "count": 0,
-            "messages": [],
-            "hint": "Task still running. Call hermes_messages_stream again." if still_running else "Timed out.",
-        }, indent=2)
+            "status": "events",
+            "count": len(events),
+            "events": events,
+        }, indent=2, ensure_ascii=False)
 
-    # ── Send ──
 
-    @mcp.tool()
-    async def hermes_messages_send(target: str, message: str) -> str:
-        """Send a message to a platform channel.
+# ── Event formatting & merging ──
 
-        Args:
-            target: Platform target in "platform:chat_id" format (e.g. "telegram:6308981865")
-            message: The message text to send
-        """
-        if not target or not message:
-            return json.dumps({"error": "Both target and message are required"})
-        if ":" not in target:
-            return json.dumps({"error": "Target must be 'platform:chat_id' format (e.g. 'telegram:12345')"})
+# Event types that should be merged when consecutive
+_MERGEABLE = {"reasoning.delta", "thinking.delta", "response.chunk", "message.delta"}
 
-        platform, chat_id = target.split(":", 1)
-        if not platform or not chat_id:
-            return json.dumps({"error": "Both platform and chat_id are required in target"})
 
-        try:
-            r = await bridge.call("message.send", {
-                "platform": platform,
-                "chat_id": chat_id,
-                "message": message,
-            }, timeout=SHORT_RPC_TIMEOUT)
-            if "result" in r:
-                return json.dumps({"ok": True, "target": target, "result": r["result"]}, indent=2)
-            return json.dumps({"error": r.get("error", "Send failed")}, indent=2)
-        except TimeoutError:
-            return json.dumps({"error": f"Send timed out for target: {target}"}, indent=2)
-        except Exception as e:
-            return json.dumps({"error": f"Send failed: {e}"}, indent=2)
+def _format_and_merge(raw_events: list[dict]) -> list[dict]:
+    """Format raw WS events and merge consecutive identical delta events."""
+    if not raw_events:
+        return []
 
-    # ── Channels ──
+    result = []
+    for ev in raw_events:
+        formatted = _format_one(ev)
+        # Merge with previous if same type and both are delta events
+        if result and result[-1].get("event") == formatted.get("event") \
+                and formatted.get("event") in _MERGEABLE:
+            prev = result[-1]
+            prev["text"] = prev.get("text", "") + formatted.get("text", "")
+            if "delta" in formatted:
+                prev["delta"] = prev.get("delta", "") + formatted.get("delta", "")
+        else:
+            result.append(formatted)
 
-    @mcp.tool()
-    def hermes_channels_list(platform: str = "") -> str:
-        """List available messaging channels and targets.
+    return result
 
-        Args:
-            platform: Filter by platform name
-        """
-        directory = db.get_channel_directory()
-        if not directory:
-            entries = db.get_sessions_index()
-            targets = []
-            seen = set()
-            for key, entry in entries.items():
-                origin = entry.get("origin", {})
-                p = entry.get("platform") or origin.get("platform", "")
-                chat_id = origin.get("chat_id", "")
-                if not p or not chat_id:
-                    continue
-                if platform and p.lower() != platform.lower():
-                    continue
-                target_str = f"{p}:{chat_id}"
-                if target_str in seen:
-                    continue
-                seen.add(target_str)
-                targets.append({
-                    "target": target_str,
-                    "platform": p,
-                    "name": entry.get("display_name") or origin.get("chat_name", ""),
-                    "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
-                })
-            return json.dumps({"count": len(targets), "channels": targets}, indent=2)
 
-        channels = []
-        for plat, entries_list in directory.get("platforms", {}).items():
-            if platform and plat.lower() != platform.lower():
-                continue
-            if isinstance(entries_list, list):
-                for ch in entries_list:
-                    if isinstance(ch, dict):
-                        chat_id = ch.get("id", ch.get("chat_id", ""))
-                        channels.append({
-                            "target": f"{plat}:{chat_id}" if chat_id else plat,
-                            "platform": plat,
-                            "name": ch.get("name", ch.get("display_name", "")),
-                            "chat_type": ch.get("type", ""),
-                        })
-        return json.dumps({"count": len(channels), "channels": channels}, indent=2)
+def _format_one(ev: dict) -> dict:
+    """Format a single raw WS event into a structured dict."""
+    ev_name = ev.get("event", "")
+    ev_data = ev.get("data", {})
+
+    # Tool call started
+    if ev_name in ("tool.call", "tool.start"):
+        return {
+            "event": "tool_call",
+            "name": ev_data.get("name", ""),
+            "input": ev_data.get("args_text", ev_data.get("input", "")),
+        }
+
+    # Tool completed
+    if ev_name in ("tool.complete", "tool_result"):
+        output = ev_data.get("result", "")
+        if isinstance(output, dict):
+            output = output.get("output", "")[:1000]
+        else:
+            output = str(output)[:1000]
+        return {
+            "event": "tool_result",
+            "name": ev_data.get("name", ""),
+            "output": output,
+        }
+
+    # Reasoning / thinking delta
+    if ev_name in ("reasoning.delta", "thinking.delta"):
+        return {"event": ev_name, "text": ev_data.get("text", "")}
+
+    # Streaming text chunk
+    if ev_name in ("response.chunk", "message.delta"):
+        return {"event": ev_name, "text": ev_data.get("text", ""), "delta": ev_data.get("delta", "")}
+
+    # Full message completed
+    if ev_name == "message.complete":
+        return {"event": "completed", "text": ev_data.get("text", ""), "usage": ev_data.get("usage", {})}
+
+    # Background task completed
+    if ev_name == "background.complete":
+        return {"event": "completed", "text": ev_data.get("text", "")}
+
+    # Errors
+    if ev_name in ("response.error", "background.error"):
+        return {"event": "error", "message": ev_data.get("message", "Unknown error")}
+
+    # Approval request
+    if ev_name == "approval.request":
+        return {
+            "event": "approval_required",
+            "id": ev_data.get("pattern_key", ev_data.get("id", "")),
+            "command": ev_data.get("command", ""),
+            "description": ev_data.get("description", ""),
+        }
+
+    # Pass through
+    return {"event": ev_name or "unknown", "data": ev_data}
 
     # ── Events ──
 
@@ -310,12 +253,11 @@ def register_messaging_tools(mcp, bridge, db, cursor):
             after_cursor: Return events after this cursor (0 for all)
             limit: Max events to return
         """
-        events = await bridge.collect_events()
-        if after_cursor > 0:
-            events = [e for e in events if e.get("id", 0) > after_cursor]
+        events = bridge._events
+        filtered = [e for e in events if True]
         return json.dumps({
-            "count": len(events[-limit:]),
-            "events": events[-limit:],
+            "count": len(filtered[-limit:]),
+            "events": filtered[-limit:],
         }, indent=2, ensure_ascii=False)
 
     @mcp.tool()
