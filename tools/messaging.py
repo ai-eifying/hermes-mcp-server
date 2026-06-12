@@ -118,7 +118,7 @@ def register_messaging_tools(mcp, bridge, cursor):
             start = time.time()
             while time.time() - start < timeout:
                 remaining_ms = int((timeout - (time.time() - start)) * 1000)
-                ev = await bridge.wait_for_event(timeout_ms=min(3000, max(200, remaining_ms)))
+                ev = await bridge.wait_for_event(timeout_ms=min(1000, max(200, remaining_ms)))
                 if ev:
                     raw_events.append(ev)
                     break
