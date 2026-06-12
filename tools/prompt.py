@@ -15,8 +15,9 @@ def register_prompt_tools(mcp, bridge):
     async def hermes_prompt_submit(prompt: str, timeout: int = DEFAULT_RPC_TIMEOUT) -> str:
         """Send a prompt to Hermes Agent and wait for the full response.
 
-        The agent processes your prompt, uses tools as needed, and returns
-        the complete response. Handles approval requests automatically.
+        Blocks until the agent completes. Returns the final response text,
+        tool calls summary, and token usage. If an approval is required,
+        returns approval_required with details for hermes_approval_respond.
 
         Args:
             prompt: The prompt text to send
@@ -96,8 +97,9 @@ def register_prompt_tools(mcp, bridge):
     async def hermes_prompt_background(prompt: str) -> str:
         """Submit a prompt without waiting for completion (fire-and-forget).
 
-        Use hermes_messages_stream afterward to poll for results as they come in.
-        This is the recommended way for long-running tasks.
+        Clears the event buffer and submits the prompt. Use hermes_messages_stream
+        afterward to read completion events. For real-time streaming with tool
+        calls and intermediate events, use hermes_prompt_stream instead.
 
         Args:
             prompt: The prompt text to send
@@ -135,16 +137,16 @@ def register_prompt_tools(mcp, bridge):
 
     @mcp.tool()
     async def hermes_prompt_stream(prompt: str) -> str:
-        """Submit a prompt and enable event streaming (non-blocking).
+        """Submit a prompt and enable event streaming.
 
-        Unlike hermes_prompt_background (fire-and-forget), this keeps the
-        event buffer intact so hermes_messages_stream can read tool calls,
-        message chunks, and completion events in real-time.
+        Unlike hermes_prompt_background, this does NOT clear the event buffer,
+        so hermes_messages_stream can read tool calls, message chunks, and
+        completion events in real-time as they arrive.
 
         Workflow:
             1. hermes_prompt_stream("do something")  → returns immediately
-            2. loop: hermes_messages_stream(timeout=5) → returns one event per call
-            3. break when event == "completed" or "error"
+            2. loop: hermes_messages_stream(timeout=5) → returns batched events
+            3. break when "completed" event appears
 
         Args:
             prompt: The prompt text to send

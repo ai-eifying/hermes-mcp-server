@@ -93,11 +93,12 @@ def register_messaging_tools(mcp, bridge, cursor):
     async def hermes_messages_stream(
         timeout: int = STREAM_DEFAULT_TIMEOUT,
     ) -> str:
-        """Wait for events using long-poll streaming. Returns ALL unread events.
+        """Wait for events using long-poll streaming. Returns ALL buffered events.
 
         Each call drains the event buffer, then waits for more events until
-        timeout. Consecutive events of the same type (e.g. reasoning.delta)
-        are merged into one. Returns immediately if events are buffered.
+        timeout. Consecutive events of the same type (e.g. reasoning.delta,
+        message.delta) are merged into one with concatenated text. Returns
+        immediately if events are already buffered.
 
         Args:
             timeout: Max seconds to wait (default 60, max 300)
