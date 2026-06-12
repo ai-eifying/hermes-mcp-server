@@ -113,34 +113,34 @@ def register_messaging_tools(mcp, bridge, cursor):
         # Collect all events: drain buffer + wait for more
         raw_events = await bridge.collect_events()
 
-        # If nothing buffered, wait for at least one event
-        if not raw_events:
-            start = time.time()
-            while time.time() - start < timeout:
-                remaining_ms = int((timeout - (time.time() - start)) * 1000)
-                ev = await bridge.wait_for_event(timeout_ms=min(1000, max(200, remaining_ms)))
-                if ev:
-                    raw_events.append(ev)
-                    break
-            if not raw_events:
-                # Still nothing — check if running
-                sid = bridge.session_id
-                still_running = False
-                if sid:
-                    try:
-                        status_r = await bridge.session_status(sid)
-                        output = status_r.get("result", {}).get("output", "")
-                        still_running = "Agent Running: Yes" in output
-                    except Exception:
-                        pass
-                return json.dumps({
-                    "status": "timeout",
-                    "events": [],
-                    "running": still_running,
-                }, indent=2)
+        # Wait for events until timeout
+        start = time.time()
+        while time.time() - start < timeout:
+            remaining_ms = int((timeout - (time.time() - start)) * 1000)
+            ev = await bridge.wait_for_event(timeout_ms=min(1000, max(200, remaining_ms)))
+            if ev:
+                raw_events.append(ev)
+                # Don't break — keep collecting until timeout
 
-            # Drain any remaining buffered events (non-blocking)
-            raw_events.extend(await bridge.collect_events())
+        # Drain any remaining buffered events (non-blocking)
+        raw_events.extend(await bridge.collect_events())
+
+        if not raw_events:
+            # Nothing collected — check if running
+            sid = bridge.session_id
+            still_running = False
+            if sid:
+                try:
+                    status_r = await bridge.session_status(sid)
+                    output = status_r.get("result", {}).get("output", "")
+                    still_running = "Agent Running: Yes" in output
+                except Exception:
+                    pass
+            return json.dumps({
+                "status": "timeout",
+                "events": [],
+                "running": still_running,
+            }, indent=2)
 
         # Format and merge consecutive identical event types
         events = _format_and_merge(raw_events)
