@@ -16,6 +16,7 @@ import re
 import ssl
 import time
 import urllib.request
+from collections import deque
 from typing import Optional
 
 try:
@@ -47,7 +48,8 @@ class WSBridge:
         self.session_id = ""
         self.auto_approve = auto_approve
         self._pending: dict[str, asyncio.Future] = {}
-        self._events: list[dict] = []
+        self._events: deque[dict] = deque()
+        self._events_lock = asyncio.Lock()
         self._events_cv: Optional[asyncio.Condition] = None
         self._req_counter = 0
         self._lock = asyncio.Lock()
@@ -235,20 +237,21 @@ class WSBridge:
                 "session_id": params.get("session_id", ""),
                 "data": params.get("payload", {}),
             }
-            self._events.append(event)
-            if event["event"] == "approval.request" and self.auto_approve:
-                asyncio.create_task(self._auto_approve(event))
-            if self._events_cv:
-                asyncio.create_task(self._notify_events())
+            asyncio.create_task(self._append_event(event))
             return
 
         # Legacy event format (direct event field)
         if "event" in data:
-            self._events.append(data)
-            if data["event"] == "approval.request" and self.auto_approve:
-                asyncio.create_task(self._auto_approve(data))
-            if self._events_cv:
-                asyncio.create_task(self._notify_events())
+            asyncio.create_task(self._append_event(data))
+
+    async def _append_event(self, event: dict):
+        """Append event to buffer with lock protection."""
+        async with self._events_lock:
+            self._events.append(event)
+        if event.get("event") == "approval.request" and self.auto_approve:
+            asyncio.create_task(self._auto_approve(event))
+        if self._events_cv:
+            asyncio.create_task(self._notify_events())
 
     async def _notify_events(self):
         async with self._events_cv:
@@ -288,12 +291,14 @@ class WSBridge:
 
     # ── Events ──
 
-    def clear_events(self):
-        self._events.clear()
+    async def clear_events(self):
+        async with self._events_lock:
+            self._events.clear()
 
-    def collect_events(self) -> list[dict]:
-        evs = self._events.copy()
-        self._events.clear()
+    async def collect_events(self) -> list[dict]:
+        async with self._events_lock:
+            evs = list(self._events)
+            self._events.clear()
         return evs
 
     async def wait_for_event(self, timeout_ms: int = 30000) -> Optional[dict]:
@@ -302,8 +307,9 @@ class WSBridge:
         start = time.time()
 
         while time.time() - start < timeout_s:
-            if self._events:
-                return self._events.pop(0)
+            async with self._events_lock:
+                if self._events:
+                    return self._events.popleft()
             if self._events_cv:
                 remaining = timeout_s - (time.time() - start)
                 try:

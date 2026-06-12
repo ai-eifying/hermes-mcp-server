@@ -91,7 +91,6 @@ def register_messaging_tools(mcp, bridge, cursor):
 
     @mcp.tool()
     async def hermes_messages_stream(
-        session_id: str = "",
         timeout: int = STREAM_DEFAULT_TIMEOUT,
     ) -> str:
         """Wait for events using long-poll streaming. Returns ALL unread events.
@@ -101,7 +100,6 @@ def register_messaging_tools(mcp, bridge, cursor):
         are merged into one. Returns immediately if events are buffered.
 
         Args:
-            session_id: Target session (empty = current)
             timeout: Max seconds to wait (default 60, max 300)
 
         Returns JSON with:
@@ -112,13 +110,9 @@ def register_messaging_tools(mcp, bridge, cursor):
         timeout = max(1, min(timeout, STREAM_MAX_TIMEOUT))
 
         # Collect all events: drain buffer + wait for more
-        raw_events = []
+        raw_events = await bridge.collect_events()
 
-        # 1. Drain ALL buffered events
-        while bridge._events:
-            raw_events.append(bridge._events.pop(0))
-
-        # 2. If nothing buffered, wait for at least one event
+        # If nothing buffered, wait for at least one event
         if not raw_events:
             start = time.time()
             while time.time() - start < timeout:
@@ -129,7 +123,7 @@ def register_messaging_tools(mcp, bridge, cursor):
                     break
             if not raw_events:
                 # Still nothing — check if running
-                sid = session_id or bridge.session_id
+                sid = bridge.session_id
                 still_running = False
                 if sid:
                     try:
@@ -144,11 +138,10 @@ def register_messaging_tools(mcp, bridge, cursor):
                     "running": still_running,
                 }, indent=2)
 
-        # 3. Drain any remaining buffered events (non-blocking)
-        while bridge._events:
-            raw_events.append(bridge._events.pop(0))
+            # Drain any remaining buffered events (non-blocking)
+            raw_events.extend(await bridge.collect_events())
 
-        # 4. Format and merge consecutive identical event types
+        # Format and merge consecutive identical event types
         events = _format_and_merge(raw_events)
 
         return json.dumps({
@@ -202,13 +195,13 @@ def _format_one(ev: dict) -> dict:
     if ev_name in ("tool.complete", "tool_result"):
         output = ev_data.get("result", "")
         if isinstance(output, dict):
-            output = output.get("output", "")[:1000]
+            output = output.get("output", "") or output.get("text", "") or str(output)
         else:
-            output = str(output)[:1000]
+            output = str(output) if output else ""
         return {
             "event": "tool_result",
             "name": ev_data.get("name", ""),
-            "output": output,
+            "output": output[:1000],
         }
 
     # Reasoning / thinking delta
@@ -253,11 +246,12 @@ def _format_one(ev: dict) -> dict:
             after_cursor: Return events after this cursor (0 for all)
             limit: Max events to return
         """
-        events = bridge._events
-        filtered = [e for e in events if True]
+        events = await bridge.collect_events()
+        if after_cursor > 0:
+            events = [e for e in events if e.get("id", 0) > after_cursor]
         return json.dumps({
-            "count": len(filtered[-limit:]),
-            "events": filtered[-limit:],
+            "count": len(events[-limit:]),
+            "events": events[-limit:],
         }, indent=2, ensure_ascii=False)
 
     @mcp.tool()
