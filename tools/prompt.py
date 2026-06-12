@@ -157,7 +157,7 @@ def register_prompt_tools(mcp, bridge):
 
         # Do NOT clear events — let them accumulate for streaming
         try:
-            r = await bridge.call("prompt.background", {
+            r = await bridge.call("prompt.submit", {
                 "session_id": bridge.session_id,
                 "text": prompt,
             }, timeout=30)
