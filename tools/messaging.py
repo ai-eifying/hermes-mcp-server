@@ -110,8 +110,9 @@ def register_messaging_tools(mcp, bridge, cursor):
         """
         timeout = max(1, min(timeout, STREAM_MAX_TIMEOUT))
 
-        # Collect all events: drain buffer + wait for more
-        raw_events = await bridge.collect_events()
+        # Clear old buffered events — only return events arriving from now on
+        await bridge.clear_events()
+        raw_events: list[dict] = []
 
         # Wait for events until timeout
         start = time.time()
@@ -152,10 +153,45 @@ def register_messaging_tools(mcp, bridge, cursor):
         }, indent=2, ensure_ascii=False)
 
 
+    # ── Events (raw polling) ──
+
+    @mcp.tool()
+    async def hermes_events_poll(after_cursor: int = 0, limit: int = 20) -> str:
+        """Poll for raw events since a cursor position.
+
+        Args:
+            after_cursor: Return events after this cursor (0 for all)
+            limit: Max events to return
+        """
+        events = await bridge.collect_events()
+        if after_cursor > 0:
+            events = [e for e in events if e.get("id", 0) > after_cursor]
+        return json.dumps({
+            "count": len(events[-limit:]),
+            "events": events[-limit:],
+        }, indent=2, ensure_ascii=False)
+
+    @mcp.tool()
+    async def hermes_events_wait(after_cursor: int = 0, timeout_ms: int = 30000) -> str:
+        """Wait for the next raw event (long-poll).
+
+        Args:
+            after_cursor: Wait for events after this cursor
+            timeout_ms: Max wait time in milliseconds (default 30000)
+        """
+        ev = await bridge.wait_for_event(timeout_ms=min(timeout_ms, 300000))
+        if ev:
+            return json.dumps({"event": ev}, indent=2, ensure_ascii=False)
+        return json.dumps({"event": None, "reason": "timeout"}, indent=2)
+
+
 # ── Event formatting & merging ──
 
 # Event types that should be merged when consecutive
 _MERGEABLE = {"reasoning.delta", "thinking.delta", "response.chunk", "message.delta"}
+
+# Event types to silently discard
+_IGNORED = {"session.info"}
 
 
 def _format_and_merge(raw_events: list[dict]) -> list[dict]:
@@ -165,6 +201,8 @@ def _format_and_merge(raw_events: list[dict]) -> list[dict]:
 
     result = []
     for ev in raw_events:
+        if ev.get("event", "") in _IGNORED:
+            continue
         formatted = _format_one(ev)
         # Merge with previous if same type and both are delta events
         if result and result[-1].get("event") == formatted.get("event") \
@@ -236,34 +274,3 @@ def _format_one(ev: dict) -> dict:
 
     # Pass through
     return {"event": ev_name or "unknown", "data": ev_data}
-
-    # ── Events ──
-
-    @mcp.tool()
-    async def hermes_events_poll(after_cursor: int = 0, limit: int = 20) -> str:
-        """Poll for raw events since a cursor position.
-
-        Args:
-            after_cursor: Return events after this cursor (0 for all)
-            limit: Max events to return
-        """
-        events = await bridge.collect_events()
-        if after_cursor > 0:
-            events = [e for e in events if e.get("id", 0) > after_cursor]
-        return json.dumps({
-            "count": len(events[-limit:]),
-            "events": events[-limit:],
-        }, indent=2, ensure_ascii=False)
-
-    @mcp.tool()
-    async def hermes_events_wait(after_cursor: int = 0, timeout_ms: int = 30000) -> str:
-        """Wait for the next raw event (long-poll).
-
-        Args:
-            after_cursor: Wait for events after this cursor
-            timeout_ms: Max wait time in milliseconds (default 30000)
-        """
-        ev = await bridge.wait_for_event(timeout_ms=min(timeout_ms, 300000))
-        if ev:
-            return json.dumps({"event": ev}, indent=2, ensure_ascii=False)
-        return json.dumps({"event": None, "reason": "timeout"}, indent=2)

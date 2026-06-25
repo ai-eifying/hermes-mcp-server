@@ -28,6 +28,7 @@ from config import (
     DASHBOARD_HTTP_URL,
     DASHBOARD_WS_URL,
     DEFAULT_RPC_TIMEOUT,
+    SHORT_RPC_TIMEOUT,
     STATE_FILE,
     STREAM_POLL_INTERVAL,
     WS_MAX_SIZE,
@@ -300,6 +301,11 @@ class WSBridge:
             evs = list(self._events)
             self._events.clear()
         return evs
+
+    async def peek_events(self) -> list[dict]:
+        """Return a copy of buffered events without consuming them."""
+        async with self._events_lock:
+            return list(self._events)
 
     async def wait_for_event(self, timeout_ms: int = 30000) -> Optional[dict]:
         """Wait for the next WS event (long-poll)."""

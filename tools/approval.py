@@ -35,7 +35,7 @@ def register_approval_tools(mcp, bridge):
     async def hermes_permissions_list() -> str:
         """List pending approval requests from buffered events."""
         approvals = []
-        for ev in bridge._events:
+        for ev in await bridge.peek_events():
             if ev.get("event") == "approval.request":
                 data = ev.get("data", {})
                 # ID is pattern_key (e.g. "shell command via -c/-lc flag")

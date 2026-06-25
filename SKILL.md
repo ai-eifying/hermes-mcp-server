@@ -253,6 +253,7 @@ MCP 客户端配置：
 {
   "mcpServers": {
     "hermes-agent": {
+      "type": "http",
       "url": "http://<hermes-ip>:9221/mcp"
     }
   }
